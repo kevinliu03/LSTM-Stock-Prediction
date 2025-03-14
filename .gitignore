@@ -1,2 +1,8 @@
-trainingModel/
+# Folders
+predictions/
 stock_csv/
+training_times/
+trainingModel/
+
+# Files
+training_times

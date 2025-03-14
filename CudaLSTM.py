@@ -7,6 +7,7 @@ from sklearn.model_selection import train_test_split
 import os
 import joblib
 from datetime import datetime, timedelta
+import time
 
 class ImprovedStockLSTM(nn.Module):
     def __init__(self, input_size, hidden_size=50, num_layers=2, dropout=0.2):
@@ -162,123 +163,6 @@ def train_model(model, X_train, y_train, X_test, y_test, epochs=150, batch_size=
     
     return model, train_losses, val_losses
 
-def predict_next_day_full(model, data, scaler, sequence_length=45, target_idx=3):
-    # Get the last sequence_length days of data
-    last_data = data.copy()
-    
-    # Get the features used for prediction
-    features = ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOL', 'MA7', 'MA14', 'MA30', 'RETURN', 'VOLATILITY', 'RSI']
-    last_sequence = last_data[-sequence_length:][features].values
-    
-    # Scale the data
-    last_sequence_scaled = scaler.transform(last_sequence)
-    
-    # Convert to tensor and predict
-    input_tensor = torch.FloatTensor(last_sequence_scaled).unsqueeze(0).to(device)
-    model.eval()
-    with torch.no_grad():
-        prediction = model(input_tensor).cpu().numpy()[0, 0]
-    
-    # Create dummy array for inverse transformation
-    dummy = np.zeros((1, scaler.scale_.shape[0]))
-    dummy[0, target_idx] = prediction
-    
-    # Inverse transform to get the actual predicted close price
-    predicted_close = scaler.inverse_transform(dummy)[0, target_idx]
-    
-    # Get the last row for reference
-    last_row = data.iloc[-1]
-    
-    # Calculate price change percentage
-    last_close = last_row['CLOSE']
-    price_change_pct = (predicted_close - last_close) / last_close
-    
-    # Estimate other values based on the predicted change
-    predicted_open = last_close * (1 + price_change_pct * 0.5)
-    predicted_high = max(predicted_close, predicted_open) * (1 + abs(price_change_pct) * 0.2)
-    predicted_low = min(predicted_close, predicted_open) * (1 - abs(price_change_pct) * 0.2)
-    
-    # Ensure high is the highest and low is the lowest
-    predicted_high = max(predicted_high, predicted_open, predicted_close)
-    predicted_low = min(predicted_low, predicted_open, predicted_close)
-    
-    # Estimate volume based on price volatility
-    predicted_vol = last_row['VOL'] * (1 + abs(price_change_pct) * 2)
-    
-    # Get next date
-    if 'DATE' in last_row:
-        # Convert integer date to string, parse it, add one day
-        current_date = datetime.strptime(str(int(last_row['DATE'])), '%Y%m%d')
-        next_date = current_date + timedelta(days=1)
-        next_date_str = next_date.strftime('%Y%m%d')
-    else:
-        # If no DATE column, use current date
-        next_date_str = datetime.now().strftime('%Y%m%d')
-
-    
-    # Get ticker symbol
-    ticker = last_row['TICKER'] if 'TICKER' in last_row else 'A'
-    
-    # Create prediction row
-    prediction_row = {
-        'TICKER': ticker,
-        'PER': last_row['PER'] if 'PER' in last_row else 'D',
-        'DATE': next_date_str,
-        'TIME': last_row['TIME'] if 'TIME' in last_row else 0,
-        'OPEN': round(predicted_open, 4),
-        'HIGH': round(predicted_high, 4),
-        'LOW': round(predicted_low, 4),
-        'CLOSE': round(predicted_close, 4),
-        'VOL': round(predicted_vol, 2),
-        'OPENINT': last_row['OPENINT'] if 'OPENINT' in last_row else 0
-    }
-    
-    return prediction_row
-
-def save_model_for_prediction(model, scaler, input_size, hidden_size, num_layers, ticker):
-    # Create directory if it doesn't exist
-    model_dir = os.path.join('trainingModel', ticker)
-    if not os.path.exists(model_dir):
-        os.makedirs(model_dir)
-    
-    # Save model architecture and weights
-    model_info = {
-        'input_size': input_size,
-        'hidden_size': hidden_size,
-        'num_layers': num_layers,
-        'state_dict': model.state_dict()
-    }
-    torch.save(model_info, os.path.join(model_dir, 'stock_model.pth'))
-    
-    # Save scaler
-    joblib.dump(scaler, os.path.join(model_dir, 'stock_scaler.pkl'))
-    
-    print(f"Model and scaler for {ticker} saved to '{model_dir}' directory for future predictions.")
-
-def load_model_for_prediction(ticker):
-    # Construct path to model directory
-    model_dir = os.path.join('trainingModel', ticker)
-    
-    # Check if model exists
-    if not os.path.exists(model_dir):
-        print(f"No trained model found for {ticker}")
-        return None, None
-    
-    # Load model
-    model_info = torch.load(os.path.join(model_dir, 'stock_model.pth'))
-    model = ImprovedStockLSTM(
-        input_size=model_info['input_size'],
-        hidden_size=model_info['hidden_size'],
-        num_layers=model_info['num_layers']
-    ).to(device)
-    model.load_state_dict(model_info['state_dict'])
-    model.eval()
-    
-    # Load scaler
-    scaler = joblib.load(os.path.join(model_dir, 'stock_scaler.pkl'))
-    
-    return model, scaler
-
 def train_stock_model(csv_file):
     # Extract ticker from filename
     ticker = os.path.splitext(os.path.basename(csv_file))[0]
@@ -288,20 +172,19 @@ def train_stock_model(csv_file):
     model_path = os.path.join(model_dir, 'stock_model.pth')
     scaler_path = os.path.join(model_dir, 'stock_scaler.pkl')
     
-    # If both model and scaler exist, skip training
     if os.path.exists(model_path) and os.path.exists(scaler_path):
         print(f"Model for {ticker} already exists. Skipping training.")
         return None, None
     
     print(f"\nTraining model for {ticker}...")
     
+    # Start timer
+    start_time = time.time()
+    
     # Load data
     data = pd.read_csv(csv_file)
-    
-    # Ensure column names are clean
     data.columns = data.columns.str.strip()
     
-    # Add ticker column if not present
     if 'TICKER' not in data.columns:
         data['TICKER'] = ticker
     
@@ -319,21 +202,52 @@ def train_stock_model(csv_file):
         model, X_train, y_train, X_test, y_test, epochs=150, batch_size=64, patience=30
     )
     
+    # End timer and calculate training time
+    end_time = time.time()
+    training_time = end_time - start_time
+    
+    # Determine device type (GPU or CPU)
+    device_type = 'GPU' if torch.cuda.is_available() else 'CPU'
+    
+    # Save training time to appropriate CSV file
+    timing_data = {
+        'Ticker': ticker,
+        'Device': device_type,
+        'Training_Time': round(training_time, 2)  # Save training time in seconds
+    }
+    
+    timing_dir = 'training_time'
+    
+    if not os.path.exists(timing_dir):
+        os.makedirs(timing_dir)
+    
+    timing_csv_path = os.path.join(timing_dir, f'training_time_{device_type}.csv')
+    
+    if not os.path.exists(timing_csv_path):
+        pd.DataFrame([timing_data]).to_csv(timing_csv_path, index=False)
+    else:
+        existing_data = pd.read_csv(timing_csv_path)
+        updated_data = pd.concat([existing_data, pd.DataFrame([timing_data])], ignore_index=True)
+        updated_data.to_csv(timing_csv_path, index=False)
+    
+    print(f"Training time for {ticker}: {training_time:.2f} seconds")
+    
     # Save model for future predictions
     save_model_for_prediction(trained_model, scaler, input_size, hidden_size, num_layers, ticker)
     
-    # Predict next day's values
+    # Predict next day's values (hardcoded date modification applied here)
     next_day_values = predict_next_day_full(trained_model, data, scaler, target_idx=target_idx)
     
-    # Print in the exact format requested
     print(f"{next_day_values['TICKER']} {next_day_values['PER']} {next_day_values['DATE']} {next_day_values['TIME']} {next_day_values['OPEN']} {next_day_values['HIGH']} {next_day_values['LOW']} {next_day_values['CLOSE']} {next_day_values['VOL']} {next_day_values['OPENINT']}")
     
-    # Save prediction to CSV
     prediction_df = pd.DataFrame([next_day_values])
     prediction_dir = os.path.join('predictions')
+    
     if not os.path.exists(prediction_dir):
         os.makedirs(prediction_dir)
+        
     prediction_df.to_csv(os.path.join(prediction_dir, f'{ticker}_prediction.csv'), index=False)
+    
     print(f"Prediction saved to 'predictions/{ticker}_prediction.csv'")
     
     return trained_model, scaler
@@ -565,6 +479,124 @@ def evaluate_models():
     else:
         print("No models were successfully evaluated.")
 
+def predict_next_day_full(model, data, scaler, sequence_length=45, target_idx=3):
+    # Get the last sequence_length days of data
+    last_data = data.copy()
+    
+    # Get the features used for prediction
+    features = ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOL', 'MA7', 'MA14', 'MA30', 'RETURN', 'VOLATILITY', 'RSI']
+    last_sequence = last_data[-sequence_length:][features].values
+    
+    # Scale the data
+    last_sequence_scaled = scaler.transform(last_sequence)
+    
+    # Convert to tensor and predict
+    input_tensor = torch.FloatTensor(last_sequence_scaled).unsqueeze(0).to(device)
+    model.eval()
+    with torch.no_grad():
+        prediction = model(input_tensor).cpu().numpy()[0, 0]
+    
+    # Create dummy array for inverse transformation
+    dummy = np.zeros((1, scaler.scale_.shape[0]))
+    dummy[0, target_idx] = prediction
+    
+    # Inverse transform to get the actual predicted close price
+    predicted_close = scaler.inverse_transform(dummy)[0, target_idx]
+    
+    # Get the last row for reference
+    last_row = data.iloc[-1]
+    
+    # Calculate price change percentage
+    last_close = last_row['CLOSE']
+    price_change_pct = (predicted_close - last_close) / last_close
+    
+    # Estimate other values based on the predicted change
+    predicted_open = last_close * (1 + price_change_pct * 0.5)
+    predicted_high = max(predicted_close, predicted_open) * (1 + abs(price_change_pct) * 0.2)
+    predicted_low = min(predicted_close, predicted_open) * (1 - abs(price_change_pct) * 0.2)
+    
+    # Ensure high is the highest and low is the lowest
+    predicted_high = max(predicted_high, predicted_open, predicted_close)
+    predicted_low = min(predicted_low, predicted_open, predicted_close)
+    
+    # Estimate volume based on price volatility
+    predicted_vol = last_row['VOL'] * (1 + abs(price_change_pct) * 2)
+    
+    # Get next date
+    if 'DATE' in last_row:
+        # Convert integer date to string, parse it, add one day
+        current_date = datetime.strptime(str(int(last_row['DATE'])), '%Y%m%d')
+        next_date = current_date + timedelta(days=1)
+        # next_date_str = next_date.strftime('%Y%m%d')
+        next_date_str = '20250307'
+    else:
+        # If no DATE column, use current date
+        next_date_str = datetime.now().strftime('%Y%m%d')
+
+    
+    # Get ticker symbol
+    ticker = last_row['TICKER'] if 'TICKER' in last_row else 'A'
+    
+    # Create prediction row
+    prediction_row = {
+        'TICKER': ticker,
+        'PER': last_row['PER'] if 'PER' in last_row else 'D',
+        'DATE': next_date_str,
+        'TIME': last_row['TIME'] if 'TIME' in last_row else 0,
+        'OPEN': round(predicted_open, 4),
+        'HIGH': round(predicted_high, 4),
+        'LOW': round(predicted_low, 4),
+        'CLOSE': round(predicted_close, 4),
+        'VOL': round(predicted_vol, 2),
+        'OPENINT': last_row['OPENINT'] if 'OPENINT' in last_row else 0
+    }
+    
+    return prediction_row
+
+def save_model_for_prediction(model, scaler, input_size, hidden_size, num_layers, ticker):
+    # Create directory if it doesn't exist
+    model_dir = os.path.join('trainingModel', ticker)
+    if not os.path.exists(model_dir):
+        os.makedirs(model_dir)
+    
+    # Save model architecture and weights
+    model_info = {
+        'input_size': input_size,
+        'hidden_size': hidden_size,
+        'num_layers': num_layers,
+        'state_dict': model.state_dict()
+    }
+    torch.save(model_info, os.path.join(model_dir, 'stock_model.pth'))
+    
+    # Save scaler
+    joblib.dump(scaler, os.path.join(model_dir, 'stock_scaler.pkl'))
+    
+    print(f"Model and scaler for {ticker} saved to '{model_dir}' directory for future predictions.")
+
+def load_model_for_prediction(ticker):
+    # Construct path to model directory
+    model_dir = os.path.join('trainingModel', ticker)
+    
+    # Check if model exists
+    if not os.path.exists(model_dir):
+        print(f"No trained model found for {ticker}")
+        return None, None
+    
+    # Load model
+    model_info = torch.load(os.path.join(model_dir, 'stock_model.pth'))
+    model = ImprovedStockLSTM(
+        input_size=model_info['input_size'],
+        hidden_size=model_info['hidden_size'],
+        num_layers=model_info['num_layers']
+    ).to(device)
+    model.load_state_dict(model_info['state_dict'])
+    model.eval()
+    
+    # Load scaler
+    scaler = joblib.load(os.path.join(model_dir, 'stock_scaler.pkl'))
+    
+    return model, scaler
+
 def main():
     # Create trainingModel directory if it doesn't exist
     if not os.path.exists('trainingModel'):
@@ -577,6 +609,6 @@ if __name__ == "__main__":
     # Check for GPU availability
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    
+
     # Train models for all CSV files
     main()
